@@ -1,0 +1,9 @@
+torch
+torchvision
+ultralytics
+opencv-python
+numpy
+av
+aiortc
+grpclib
+mediapipe
