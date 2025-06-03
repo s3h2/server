@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import time
 import math
 import asyncio
@@ -39,7 +41,7 @@ inference_threshold = 0.9
 inference_lock = threading.Lock()
 
 mp_face = mp.solutions.face_mesh
-FACE_MESH = mp_face.FaceMesh(static_image_mode=True, max_num_faces=1)
+FACE_MESH = mp_face.FaceMesh(static_image_mode=False, max_num_faces=1)
 
 l_idxs = [33, 160, 158, 133, 153, 144]
 r_idxs = [263, 387, 385, 362, 380, 373]
@@ -142,6 +144,7 @@ class InferenceVideoTrack(VideoStreamTrack):
                 segment_buffer.clear()
 
                 image_tensors = []
+                mesh_feats = []
                 for face in buffer_copy:
                     tensor = torch.from_numpy(face).permute(2, 0, 1).float() / 255
                     tensor = TF.normalize(
@@ -149,31 +152,24 @@ class InferenceVideoTrack(VideoStreamTrack):
                     )
                     tensor = TF.resize(tensor, (224, 224))
                     image_tensors.append(tensor)
+                    res = FACE_MESH.process(face)
+                    feat = [0.0] * 4
+                    if res.multi_face_landmarks:
+                        lm = res.multi_face_landmarks[0].landmark
+                        landmark_flat = []
+                        for i in range(len(lm)):
+                            landmark_flat.extend([lm[i].x, lm[i].y, lm[i].z])
+                        inference_status["landmarks"] = landmark_flat
+                        ear_l = compute_ear(lm, l_idxs)
+                        ear_r = compute_ear(lm, r_idxs)
+                        feat = [ear_l, ear_r, (ear_l+ear_r)/2, max(ear_l,ear_r)]
+                        mesh_feats.append(torch.tensor(feat, device=device, dtype=torch.float32))
+                
                 if len(image_tensors) == self.num_segments:
                     with torch.no_grad():
                         image_tensors = torch.stack(image_tensors).unsqueeze(0).to(self.device)
-                        mid = image_tensors.size(1)//2
-                        mesh_feats = []
-                        arr = image_tensors[0, mid].cpu().numpy().transpose(1,2,0)
-                        frame = (arr * 255).astype(np.uint8)[..., ::-1]
-                        res = FACE_MESH.process(frame)
-                        feat = [0.0] * 4
-                        print("FACE_MESH", res.multi_face_landmarks)
-                        if res.multi_face_landmarks:
-                            lm = res.multi_face_landmarks[0].landmark
-                            landmark_flat = []
-                            for i in range(len(lm)):
-                                landmark_flat.extend([lm[i].x, lm[i].y, lm[i].z])
-                            inference_status["landmarks"] = landmark_flat
-                            print("LANDMAKRS: ", landmark_flat)
-                            ear_l = compute_ear(lm, l_idxs)
-                            ear_r = compute_ear(lm, r_idxs)
-                            feat = [ear_l, ear_r, (ear_l+ear_r)/2, max(ear_l,ear_r)]
-                        else:
-                            inference_status["landmarks"] = []
-                        mesh_feats.append(feat)
-                        mesh = torch.tensor(mesh_feats, device=device, dtype=torch.float32)
-                        output, confidence = model(image_tensors, mesh)
+                        mesh_tensors = torch.stack(mesh_feats).unsqueeze(0).to(self.device)
+                        output, confidence = model(image_tensors, mesh_tensors)
 
                     _, predicted = torch.max(output, 1)
                     predicted_class = predicted.item()
